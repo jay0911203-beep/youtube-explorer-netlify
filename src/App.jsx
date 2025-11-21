@@ -1,5 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Play, Settings, X, Loader2, Youtube, AlertCircle, User, Calendar, Eye, FileText, ChevronLeft, Download, Copy, Github, RefreshCw, Globe, ShieldCheck } from 'lucide-react';
+import { Search, Play, Settings, X, Loader2, Youtube, AlertCircle, User, Calendar, Eye, FileText, ChevronLeft, Download, Copy, Github, RefreshCw, Globe, ShieldCheck, ServerCrash, Network } from 'lucide-react';
+
+// [핵심] Piped 우회 노드 목록 (Swarm Network)
+const SWARM_NODES = [
+  "https://pipedapi.kavin.rocks",
+  "https://api.piped.otter.sh",
+  "https://piped-api.garudalinux.org",
+  "https://api.piped.privacy.com.de",
+  "https://pipedapi.tokhmi.xyz",
+  "https://pipedapi.moomoo.me",
+  "https://api.piped.projectsegfau.lt",
+  "https://pipedapi.adminforge.de",
+  "https://pipedapi.drgns.space",
+  "https://api.piped.yt.lo",
+  "https://piped-api.lunar.icu",
+  "https://pipedapi.system41.de",
+  "https://pipedapi.r4fo.com",
+  "https://api.piped.nocensor.rest"
+];
 
 export default function App() {
   const [apiKey, setApiKey] = useState('');
@@ -13,20 +31,20 @@ export default function App() {
   const [nextPageToken, setNextPageToken] = useState(null);
   
   const [transcriptModal, setTranscriptModal] = useState({ 
-    isOpen: false, videoId: null, title: '', content: '', loading: false, status: '' 
+    isOpen: false, videoId: null, title: '', content: '', loading: false, status: '', mode: 'server' 
   });
 
-  // --- 설정 로드 ---
   useEffect(() => {
     const k = localStorage.getItem('yt_api_key');
     if(k) setApiKey(k); else setShowSettings(true);
   }, []);
 
-  useEffect(() => { if(apiKey) localStorage.setItem('yt_api_key', apiKey); }, [apiKey]);
+  useEffect(() => {
+    if(apiKey) localStorage.setItem('yt_api_key', apiKey);
+  }, [apiKey]);
 
   const decodeHtml = (h) => { try { const t = document.createElement("textarea"); t.innerHTML = h; return t.value; } catch(e){return h;} };
 
-  // --- YouTube Data API ---
   const searchChannels = async (e) => {
     e.preventDefault(); if(!query.trim()) return; setLoading(true); setViewMode('search');
     try {
@@ -62,88 +80,100 @@ export default function App() {
     } catch(e){}
   };
 
-  // =================================================================
-  // [핵심] Direct Transcript Parser (CORS Proxy 사용)
-  // Piped API 의존성을 제거하고, 유튜브 원본 데이터를 직접 해석합니다.
-  // =================================================================
-  const fetchDirectTranscript = async (videoId, updateStatus) => {
-    const PROXY_URL = 'https://corsproxy.io/?'; // 강력한 CORS 우회 프록시
-    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-
-    try {
-      updateStatus('유튜브 페이지 데이터 분석 중...');
-      
-      // 1. 유튜브 영상 페이지 HTML 가져오기
-      const response = await fetch(`${PROXY_URL}${encodeURIComponent(videoUrl)}`);
-      const html = await response.text();
-
-      // 2. 플레이어 초기 데이터(ytInitialPlayerResponse) 추출
-      // 이 데이터 안에 자막 트랙 정보가 숨겨져 있습니다.
-      const match = html.match(/var ytInitialPlayerResponse = ({.*?});/s);
-      if (!match) throw new Error("플레이어 데이터를 찾을 수 없습니다.");
-
-      const playerResponse = JSON.parse(match[1]);
-      const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-
-      if (!tracks || tracks.length === 0) {
-        throw new Error("이 영상에는 자막이 없습니다.");
-      }
-
-      // 3. 자막 트랙 선택 (한국어 -> 영어 -> 첫 번째)
-      const track = tracks.find(t => t.languageCode === 'ko') || 
-                    tracks.find(t => t.languageCode === 'en') || 
-                    tracks[0];
-
-      updateStatus(`자막 다운로드 중 (${track.name.simpleText})...`);
-
-      // 4. 실제 자막 XML 데이터 가져오기
-      const xmlUrl = `${PROXY_URL}${encodeURIComponent(track.baseUrl)}`;
-      const xmlResponse = await fetch(xmlUrl);
-      const xmlText = await xmlResponse.text();
-
-      // 5. XML 태그 제거 및 텍스트 정제
-      const cleanText = xmlText
-        .replace(/<text.*?>(.*?)<\/text>/g, '$1 ') // 태그 내용 추출
-        .replace(/<[^>]+>/g, '') // 나머지 태그 제거
-        .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&') // HTML 엔티티 복원
-        .replace(/\s+/g, ' ') // 공백 정리
-        .trim();
-
-      return { text: cleanText, lang: track.languageCode };
-
-    } catch (error) {
-      throw error;
-    }
-  };
-
-  // 자막 요청 메인 함수 (Hybrid Strategy)
-  const getTranscript = async (title, videoId) => {
-    setTranscriptModal({ isOpen: true, videoId, title, content: '', loading: true, status: '서버 요청 중...' });
+  // ----------------------------------------------------------------
+  // [전략 1] Swarm Network (Piped API 분산 처리)
+  // ----------------------------------------------------------------
+  const fetchSwarmTranscript = async (videoId, updateStatus) => {
+    const nodes = [...SWARM_NODES].sort(() => 0.5 - Math.random());
     
-    try {
-      // 1차 시도: Netlify Server Function
+    for (const [i, node] of nodes.entries()) {
       try {
-        const res = await fetch(`/.netlify/functions/transcript?videoId=${videoId}`);
+        updateStatus(`우회 경로 탐색 중 (${i+1}/${nodes.length})...`);
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), 2000); // 2초 타임아웃 (빠른 전환)
+        
+        const res = await fetch(`${node}/streams/${videoId}`, { signal: controller.signal });
+        clearTimeout(id);
+
         if (res.ok) {
           const data = await res.json();
-          if (data.success) {
-            setTranscriptModal(p => ({...p, loading: false, content: data.transcript, status: `성공 (Server: ${data.lang})`}));
-            return;
+          const subtitles = data.subtitles || [];
+          
+          const track = subtitles.find(s => s.code === 'ko' && !s.autoGenerated) ||
+                        subtitles.find(s => s.code === 'en' && !s.autoGenerated) ||
+                        subtitles.find(s => s.code === 'ko') ||
+                        subtitles[0];
+          
+          if (track) {
+            const subRes = await fetch(track.url);
+            if (subRes.ok) {
+              let text = await subRes.text();
+              text = text.replace(/WEBVTT/g, '').replace(/\d{2}:\d{2}.*?\n/g, '').replace(/<[^>]+>/g, '').replace(/\n+/g, ' ').trim();
+              return { text, source: new URL(node).hostname };
+            }
           }
         }
-        throw new Error('Server Failed');
-      } catch (serverErr) {
-        console.log("Server failed, switching to direct parser...");
-      }
+      } catch (e) { continue; }
+    }
+    throw new Error('Swarm Failed');
+  };
 
-      // 2차 시도: Direct Browser Parser (Fallback)
-      // 서버가 500이거나 실패하면 브라우저가 직접 유튜브를 분석합니다.
-      const result = await fetchDirectTranscript(videoId, (msg) => setTranscriptModal(p => ({...p, status: msg})));
+  // ----------------------------------------------------------------
+  // [전략 2] Direct Parsing (최후의 수단)
+  // ----------------------------------------------------------------
+  const fetchDirectTranscript = async (videoId, updateStatus) => {
+    updateStatus('직접 파싱 시도 중...');
+    const PROXY = 'https://corsproxy.io/?';
+    
+    const html = await (await fetch(`${PROXY}https://www.youtube.com/watch?v=${videoId}`)).text();
+    const match = html.match(/"captionTracks":(\[.*?\])/);
+    
+    if (match) {
+      const tracks = JSON.parse(match[1]);
+      const track = tracks.find(t => t.languageCode === 'ko') || tracks.find(t => t.languageCode === 'en') || tracks[0];
+      const xml = await (await fetch(`${PROXY}${encodeURIComponent(track.baseUrl)}`)).text();
       
-      setTranscriptModal(p => ({...p, loading: false, content: result.text, status: `성공 (Direct: ${result.lang})`}));
+      return {
+        text: xml.replace(/<text.*?>(.*?)<\/text>/g, '$1 ').replace(/<[^>]+>/g, '').replace(/&#39;/g, "'").replace(/\s+/g, ' ').trim(),
+        source: 'Direct Parser'
+      };
+    }
+    throw new Error('Direct Failed');
+  };
 
-    } catch (err) {
-      setTranscriptModal(p => ({...p, loading: false, content: `실패: ${err.message}`, status: '실패'}));
+  // [메인] 자막 요청 오케스트레이터
+  const getTranscript = async (title, videoId) => {
+    setTranscriptModal({ isOpen: true, videoId, title, content: '', loading: true, status: '서버 요청 중...', mode: 'server' });
+    
+    try {
+      // 1단계: Netlify 서버 시도
+      const res = await fetch(`/.netlify/functions/transcript?videoId=${videoId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setTranscriptModal(p => ({...p, loading: false, content: data.transcript, status: `완료 (Server: ${data.lang})`, mode: 'success' }));
+          return;
+        }
+      }
+      throw new Error('Server 500');
+    } catch (serverErr) {
+      // 2단계: Swarm & Direct Fallback
+      console.warn("Server failed, switching to Swarm...", serverErr);
+      setTranscriptModal(p => ({...p, status: '서버 차단됨. 우회 경로 진입...', mode: 'network' }));
+      
+      try {
+        // Swarm 먼저 시도
+        const result = await fetchSwarmTranscript(videoId, (msg) => setTranscriptModal(p => ({...p, status: msg})));
+        setTranscriptModal(p => ({...p, loading: false, content: result.text, status: `완료 (Swarm: ${result.source})`, mode: 'success' }));
+      } catch (swarmErr) {
+        // 실패 시 Direct 시도
+        try {
+          const directResult = await fetchDirectTranscript(videoId, (msg) => setTranscriptModal(p => ({...p, status: msg})));
+          setTranscriptModal(p => ({...p, loading: false, content: directResult.text, status: `완료 (Direct)`, mode: 'success' }));
+        } catch (finalErr) {
+          setTranscriptModal(p => ({...p, loading: false, content: '자막을 가져올 수 없습니다.\n\n원인: 이 영상에는 자막이 없거나, 모든 접근 경로가 차단되었습니다.', status: '실패', mode: 'error' }));
+        }
+      }
     }
   };
 
@@ -170,14 +200,17 @@ export default function App() {
             </div>
             <div className="flex-1 p-4 overflow-auto relative">
               {transcriptModal.loading ? (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white">
-                  <Loader2 className="animate-spin text-red-600 mb-2" size={32}/>
-                  <p className="text-sm text-gray-500">{transcriptModal.status}</p>
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white text-center">
+                  <Loader2 className="animate-spin text-blue-600 mb-4" size={40}/>
+                  <p className="text-sm font-bold text-gray-700 mb-1">{transcriptModal.status}</p>
+                  {transcriptModal.mode === 'network' && <p className="text-xs text-gray-500">서버가 응답하지 않아 분산 네트워크를 탐색합니다.</p>}
                 </div>
               ) : (
                 <>
                   <p className="text-sm leading-relaxed whitespace-pre-wrap">{transcriptModal.content}</p>
-                  <div className="text-xs text-right text-green-600 mt-4 flex justify-end items-center gap-1"><ShieldCheck size={12}/> {transcriptModal.status}</div>
+                  <div className={`text-xs text-right mt-4 flex justify-end items-center gap-1 font-medium ${transcriptModal.mode === 'error' ? 'text-red-600' : 'text-green-600'}`}>
+                    {transcriptModal.mode === 'error' ? <ServerCrash size={14}/> : <ShieldCheck size={14}/>} {transcriptModal.status}
+                  </div>
                 </>
               )}
             </div>
